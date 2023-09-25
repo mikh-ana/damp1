@@ -4,6 +4,7 @@ from dash.dependencies import Input, Output
 import psycopg2
 import pandas as pd
 from sshtunnel import SSHTunnelForwarder
+from datetime import datetime, timedelta
 
 
 host = '185.20.224.243'
@@ -19,44 +20,69 @@ db_password = 'TEST_PAROL'
 db_database = 'er_bot_development'
 
 
-def get_data(connection):
-    curs = connection.cursor()
-    curs.execute(
-        """
-        SELECT
-         EXTRACT(YEAR FROM created_at) AS year,
-         EXTRACT(MONTH FROM created_at) AS month,
-        COUNT(*) AS user_count
-        FROM users
-        GROUP BY
-        year, month
-        ORDER BY
-        year, month;
-        """
-    )
-    data = curs.fetchall()
+
+def get_data(connection, date_start, date_end):
+    data = []
+    current_time = date_start
+
+    while current_time <= date_end:
+        next_time = current_time + timedelta(hours=1) #прибавляется один час
+
+        curs = connection.cursor()
+        curs.execute(
+            #получаем  количвество юзеров в заданном интервале
+            """
+            SELECT COUNT(*) 
+            FROM users
+            WHERE created_at >= %s AND created_at < %s
+            """,
+            (current_time, next_time)
+        )
+        count = curs.fetchone()[0] #получ результат запроса
+
+        data.append({'time_interval': current_time, 'object_count': count}) #добавляется в словарь текущее время и количество юзеров
+
+        current_time = next_time
+
     return data
+
 
 
 app = dash.Dash(__name__)
 
+
+date_start_default = datetime(2023, 9, 1)
+date_end_default = datetime(2023, 9, 22)
+
 app.layout = html.Div([
-    dcc.Graph(id='user-count-2022'),
-    dcc.Graph(id='user-count-2023'),
-
-
-    dcc.Input(id='dummy-input-1', type='hidden', value=''),
-    dcc.Input(id='dummy-input-2', type='hidden', value='')
+    html.Label('Дата начала:'),
+    dcc.DatePickerSingle( #создание виджета для даты
+        id='date-start',
+        display_format='YYYY-MM-DD',
+        date=date_start_default.strftime('%Y-%m-%d'),  # Устанавливает начальное значение выбранной даты
+        disabled=True  # Запрещаем выбор даты
+    ),
+    html.Label('Дата конца:'),
+    dcc.DatePickerSingle(
+        id='date-end',
+        display_format='YYYY-MM-DD',
+        date=date_end_default.strftime('%Y-%m-%d'),  # Преобразование в строку
+        disabled=True  # Запрещаем выбор даты
+    ),
+    dcc.Graph(id='object-count-graph'),
 ])
 
 
 @app.callback(
-    Output('user-count-2022', 'figure'),
-    Output('user-count-2023', 'figure'),
-    [Input('dummy-input-1', 'value'),
-     Input('dummy-input-2', 'value')]
+    Output('object-count-graph', 'figure'),
+    Input('date-start', 'date'),
+    Input('date-end', 'date')
 )
-def update_graph(dummy_value_1, dummy_value_2):
+def update_graph(date_start, date_end):
+    # преобразовывавают строки в формат даты
+    date_start = datetime.strptime(date_start, '%Y-%m-%d')
+    date_end = datetime.strptime(date_end, '%Y-%m-%d')
+
 
     with SSHTunnelForwarder(
             (host, 22),
@@ -71,27 +97,18 @@ def update_graph(dummy_value_1, dummy_value_2):
             password=db_password,
             database=db_database
         )
-        data = get_data(conn)
+        data = get_data(conn, date_start, date_end)
 
+    df = pd.DataFrame(data) #cоздается объект DataFrame
 
-    df = pd.DataFrame(data, columns=['year', 'month', 'users_count'])
-    df_2022 = df[df['year'] == 2022]
-    df_2023 = df[df['year'] == 2023]
+    fig = {
+        'data': [dict(x=df['time_interval'], y=df['object_count'], type='bar')], #по х-интервал по у количество, bar-гистограмма
 
-
-    fig_2022 = {
-        'data': [dict(x=df_2022['month'], y=df_2022['users_count'], type='bar', name='2022')],
-        'layout': dict(title='Количество пользователей по месяцам в 2022 году')
+        'layout': dict(title='Количество созданных объектов по времени')
     }
 
-    fig_2023 = {
-        'data': [dict(x=df_2023['month'], y=df_2023['users_count'], type='bar', name='2023')],
-        'layout': dict(title='Количество пользователей по месяцам в 2023 году')
-    }
-
-    return fig_2022, fig_2023
+    return fig
 
 
 if __name__ == '__main__':
     app.run_server(debug=True)
-
